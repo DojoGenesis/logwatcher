@@ -1,0 +1,37 @@
+# DojoGenesis Logwatcher
+
+> Zero-dependency Go log watcher with bounded fan-out, seek-to-EOF, and context-driven lifecycle.
+
+## What this is
+
+Logwatcher is a focused, zero-dependency Go library for tailing log files and broadcasting lines to multiple concurrent subscribers. It implements bounded fan-out pub-sub: a single goroutine reads from a file tail, and multiple subscriber channels receive each line. Slow subscribers are silently dropped (lines discarded) rather than blocking the fan-out. Lifecycle is managed entirely through `context.Context` — cancel the context to stop all watchers and clean up goroutines. Designed for embedding in Go services that need to observe log output in real time.
+
+## Key capabilities
+
+- File tail with seek-to-EOF on start (no replay of existing content by default)
+- Multi-subscriber pub-sub: N readers from a single file watcher goroutine
+- Bounded fan-out: slow or blocked subscribers are silently dropped, not back-pressured
+- Context-driven lifecycle: pass a `context.Context` to control start and shutdown
+- Zero dependencies: pure Go stdlib, no third-party packages
+- Safe for concurrent use across goroutines
+- Designed for embedding in observability pipelines and log aggregation services
+
+## How to use with LLMs / agents
+
+Import as a Go library. Create a watcher with a file path and context, subscribe channels to receive log lines, and use the output in your agent observability pipeline. Pairs well with the DojoGenesis Gateway SSE `/events` stream for bridging file-based logs into agent-visible event streams.
+
+## Usage pattern
+
+```go
+watcher := logwatcher.New("/var/log/app.log", ctx)
+ch := watcher.Subscribe()
+go watcher.Watch()
+for line := range ch {
+    // handle log line
+}
+```
+
+## Links
+
+- GitHub: https://github.com/DojoGenesis/logwatcher
+- Gateway (consumer): https://github.com/DojoGenesis/gateway
