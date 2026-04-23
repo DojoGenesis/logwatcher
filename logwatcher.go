@@ -152,7 +152,7 @@ func seekToEOF(path string) int64 {
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	off, _ := f.Seek(0, 2)
 	return off
 }
@@ -164,7 +164,7 @@ func pollFile(fs *fileState) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fs.mu.Lock()
 	offset := fs.offset
