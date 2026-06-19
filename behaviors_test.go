@@ -2,6 +2,8 @@ package logwatcher_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -131,5 +133,46 @@ func TestPerFileIndependentOffset(t *testing.T) {
 		}
 	case <-time.After(300 * time.Millisecond):
 		// No cross-file bleed — correct.
+	}
+}
+
+// TestSeekToEOFMissingFileDeliversFromStart exercises the seekToEOF error branch
+// (logwatcher.go:150-153, documented as "or 0 if the file cannot be opened"):
+// when Watch is called on a path that does not yet exist, seekToEOF cannot open
+// it and returns offset 0. When the file is later created and written, pollFile
+// reads from offset 0, so the very FIRST line is delivered. This is the inverse
+// of TestSeekToEOF, where the file exists at Watch time so the offset starts at
+// EOF and pre-Watch content is correctly skipped.
+func TestSeekToEOFMissingFileDeliversFromStart(t *testing.T) {
+	// A path inside a real temp dir, but the file itself does not exist yet.
+	path := filepath.Join(t.TempDir(), "created-after-watch.log")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %q must not exist before Watch (stat err: %v)", path, err)
+	}
+
+	w, _, cancel := startWatcher(t)
+	defer cancel()
+
+	ctx := context.Background()
+	ch, unsub := w.Watch(ctx, path) // seekToEOF fails to open -> offset 0
+	defer unsub()
+
+	// Let the watcher poll at least once against the still-missing file
+	// (pollFile's os.Open also fails and returns early, leaving offset at 0).
+	time.Sleep(150 * time.Millisecond)
+
+	// Now create the file and write its first line.
+	if err := os.WriteFile(path, []byte("first-line\n"), 0o644); err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+
+	// Because the offset started at 0 (file was absent at Watch time), the very
+	// first line must be delivered — not skipped as pre-existing content.
+	evt := receiveWithTimeout(t, ch, 2*time.Second)
+	if evt.Line != "first-line" {
+		t.Errorf("got line %q, want %q (offset must start at 0 for a file absent at Watch time)", evt.Line, "first-line")
+	}
+	if evt.Path != path {
+		t.Errorf("got path %q, want %q", evt.Path, path)
 	}
 }
