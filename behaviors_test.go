@@ -2,6 +2,7 @@ package logwatcher_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -174,5 +175,69 @@ func TestSeekToEOFMissingFileDeliversFromStart(t *testing.T) {
 	}
 	if evt.Path != path {
 		t.Errorf("got path %q, want %q", evt.Path, path)
+	}
+}
+
+// TestSlowSubscriberRecoversAfterDrain locks the drop-then-RECOVER contract for
+// a slow subscriber. TestSlowSubscriberDoesNotBlockFast (logwatcher_test.go)
+// proves a saturated, never-drained subscriber does not block a fast sibling —
+// but it never proves the slow subscriber itself comes back to life. broadcast
+// (logwatcher.go:202-211) silently drops on a full channel; this test proves
+// that once the subscriber drains its buffer, it resumes receiving fresh
+// events rather than staying wedged or replaying stale/dropped ones.
+//
+// Determinism: rather than sleeping and hoping the buffer is full, we busy-wait
+// on len(chSlow) == cap(chSlow) (50) with a bounded deadline. Because pollFile
+// (logwatcher.go:162-199) scans to EOF and advances the offset in a single
+// call, reaching len==cap==50 deterministically proves both (a) the channel is
+// saturated and (b) the offset is already past all 60 written lines, so no
+// further old-line broadcasts are pending when we drain. The recovery line is
+// appended only after the drain completes, so it can only reach chSlow via a
+// poll that runs after the append.
+func TestSlowSubscriberRecoversAfterDrain(t *testing.T) {
+	path := tmpFile(t)
+	w, _, cancel := startWatcher(t)
+	defer cancel()
+
+	ctx := context.Background()
+
+	// Slow subscriber: never read during setup, so its buffer fills and drops.
+	chSlow, unsubSlow := w.Watch(ctx, path)
+	defer unsubSlow()
+
+	// Give the watcher one poll cycle to register the file.
+	time.Sleep(150 * time.Millisecond)
+
+	// Write more lines than the buffer (50) to guarantee saturation + drops.
+	for i := 0; i < 60; i++ {
+		appendLine(t, path, fmt.Sprintf("line-%d", i))
+	}
+
+	// Saturation sync: busy-wait with a deadline until the channel is full.
+	deadline := time.Now().Add(3 * time.Second)
+	for len(chSlow) != cap(chSlow) {
+		if time.Now().After(deadline) {
+			t.Fatalf("channel never saturated: len=%d cap=%d after 3s", len(chSlow), cap(chSlow))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Drain fully — non-blocking loop until the channel is empty.
+drainLoop:
+	for {
+		select {
+		case <-chSlow:
+		default:
+			break drainLoop
+		}
+	}
+
+	// Recovery: append a fresh line only after the drain, so it can only be
+	// delivered by a poll that runs after this append.
+	appendLine(t, path, "recovered-line")
+
+	evt := receiveWithTimeout(t, chSlow, 2*time.Second)
+	if evt.Line != "recovered-line" {
+		t.Errorf("got line %q, want %q (slow subscriber did not recover after drain)", evt.Line, "recovered-line")
 	}
 }
